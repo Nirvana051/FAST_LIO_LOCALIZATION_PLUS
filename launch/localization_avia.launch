@@ -1,21 +1,27 @@
 <launch>
 <!-- Launch file for Livox AVIA LiDAR -->
 
-	<arg name="rviz" default="true" />
+    <arg name="rviz" default="true" />
+    <arg name="map_path" default="/home/root01/rosbags/ntuitive/delta/delta.pcd" />
+    <arg name="enable_map_viz" default="true" />
 
-	<rosparam command="load" file="$(find fast_lio)/config/avia.yaml" />
+    <rosparam command="load" file="$(find fast_lio)/config/avia.yaml" />
 
-	<param name="feature_extract_enable" type="bool" value="0"/>
-	<param name="point_filter_num" type="int" value="3"/>
-	<param name="max_iteration" type="int" value="3" />
-	<param name="filter_size_surf" type="double" value="0.5" />
-	<param name="filter_size_map" type="double" value="0.5" />
-	<param name="cube_side_length" type="double" value="1000" />
-	<param name="runtime_pos_log_enable" type="bool" value="0" />
+    <param name="feature_extract_enable" type="bool" value="0"/>
+    <param name="point_filter_num" type="int" value="3"/>
+    <param name="max_iteration" type="int" value="3" />
+    <param name="filter_size_surf" type="double" value="0.5" />
+    <param name="filter_size_map" type="double" value="0.5" />
+    <param name="cube_side_length" type="double" value="1000" />
+    <param name="runtime_pos_log_enable" type="bool" value="0" />
+    <param name="map_file_path" type="string" value="$(arg map_path)" />
+    <param name="enable_map_visualization" type="bool" value="$(arg enable_map_viz)" />
+    <param name="common/encoder_topic" type="string" value="/rotor_encoder" />
+    
     <node pkg="fast_lio" type="fastlio_localization" name="fastlio_localization" output="screen" /> 
 
-	<group if="$(arg rviz)">
-	<node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_lio)/rviz_cfg/localization.rviz" />
-	</group>
+    <group if="$(arg rviz)">
+    <node launch-prefix="nice -n 10" pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_lio)/rviz_cfg/localization.rviz --splash-screen 0" output="screen" respawn="false" />
+    </group>
 
 </launch>

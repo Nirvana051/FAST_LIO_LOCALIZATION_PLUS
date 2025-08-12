@@ -25,10 +25,18 @@ ReLocalization::ReLocalization(const std::string& map_path):
     gicp_.setUseReciprocalCorrespondences(false);
 
     // set icp param
-    icp_.setMaxCorrespondenceDistance (0.05);
-    icp_.setMaximumIterations (50);
-    icp_.setTransformationEpsilon (1e-8);
-    icp_.setEuclideanFitnessEpsilon (0.01);
+    icp_.setMaxCorrespondenceDistance (0.2);
+    icp_.setMaximumIterations (100);
+    icp_.setTransformationEpsilon (1e-6);
+    icp_.setEuclideanFitnessEpsilon (0.05);
+    
+    // Initialize encoder
+    encoder_count_ = 0;
+    encoder_mutex_ = 65535.0f;
+    // 1. 激光雷达相对于转子坐标系的固定变换
+    q_rotorframe_lidar = Eigen::AngleAxisd(-60 * M_PI/180.0, Eigen::Vector3d::UnitY());
+    // 2. 基座相对于转子的变换（如果有）
+    q_base_rotor = Eigen::AngleAxisd(0 * M_PI/180.0, Eigen::Vector3d::UnitY());
 }
 ReLocalization::~ReLocalization() {
     ReleaseThread();
@@ -95,9 +103,18 @@ bool ReLocalization::reLocalization(const pcl::PointCloud<pcl::PointXYZINormal>:
     #if 1
         // rough estimation
         Eigen::Matrix4f T_offset = initial_pose_;
-        if (!NDTMatch(current_scan, local_map, T_offset)) {
-            return false;
-        }
+        std::cout << "Initial T offset:" << std::endl;
+        std::cout << T_offset << std::endl;;
+        pcl::PointCloud<pcl::PointXYZINormal>::Ptr transform_scan(new pcl::PointCloud<pcl::PointXYZINormal>);
+        pcl::transformPointCloud(*current_scan, *transform_scan, T_offset);
+        pcl::io::savePCDFileBinaryCompressed("/home/root01/rough_estimation.pcd", *transform_scan);
+        pcl::io::savePCDFileBinaryCompressed("/home/root01/local_map.pcd", *local_map);
+        //refine
+        // if (!NDTMatch(current_scan, local_map, T_offset)) {
+        //     return false;
+        // }
+        std::cout << "NDT rough estimation T offset:" << std::endl;
+        std::cout << T_offset << std::endl;
         // refine estimation
         estimation_pose =  T_offset;
         
@@ -106,10 +123,14 @@ bool ReLocalization::reLocalization(const pcl::PointCloud<pcl::PointXYZINormal>:
             std::cout << "WARNING!!! ICP could not refine the pose" << std::endl;
             return false;
         }
+        std::cout << "after refine pose estimation:" << std::endl;
+        std::cout << estimation_pose << std::endl;
 
         relocalzation_flag_ = false;
 
         pos_inv =  estimation_pose;
+        pcl::transformPointCloud(*current_scan, *transform_scan, pos_inv);
+        pcl::io::savePCDFileBinaryCompressed("/home/root01/refined_estimation.pcd", *transform_scan);
         std::cout << "after convert point size :" << local_map->points.size() << std::endl;
         std::cout << "---------------------------estimation_pose :" << pos_inv(0,3) << ", "<< pos_inv(1,3) << ", "<< pos_inv(2,3)<< std::endl;
     #else

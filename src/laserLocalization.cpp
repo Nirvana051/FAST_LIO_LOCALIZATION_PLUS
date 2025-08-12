@@ -56,6 +56,7 @@
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
 #include <geometry_msgs/Vector3.h>
+#include <std_msgs/Int32.h>
 #include <livox_ros_driver2/CustomMsg.h>
 #include <ikd-Tree/ikd_Tree.h>
 #include "preprocess.h"
@@ -487,6 +488,31 @@ void PublishLocalization(const ros::Publisher &pubGlobalization,
     br.sendTransform( tf::StampedTransform( transform, global_localization.header.stamp, "map", "local_map" ) );
 }
 
+void PublishBaseLocalization(const ros::Publisher &pubBaseLocation,
+                         const Eigen::Matrix4f &estimation_pose) {
+    nav_msgs::Odometry base_localization;
+    base_localization.header.frame_id = "map";
+    base_localization.child_frame_id = "base_link";
+    base_localization.header.stamp = ros::Time().fromSec(lidar_end_time);// ros::Time().fromSec(lidar_end_time);
+
+    base_localization.pose.pose.position.x = estimation_pose(0,3);//位置不做偏移
+    base_localization.pose.pose.position.y = estimation_pose(1,3);
+    base_localization.pose.pose.position.z = estimation_pose(2,3);
+
+    Eigen::Quaternionf quaternion(estimation_pose.topLeftCorner<3,3>());
+    // Normalize quaternion
+    quaternion.normalize();
+
+    //
+
+    base_localization.pose.pose.orientation.x = quaternion.x();
+    base_localization.pose.pose.orientation.y = quaternion.y();
+    base_localization.pose.pose.orientation.z = quaternion.z();
+    base_localization.pose.pose.orientation.w = quaternion.w();
+    
+    pubBaseLocation.publish(base_localization);
+}
+
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
     double match_start = omp_get_wtime();
@@ -560,7 +586,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     if (effct_feat_num < 1)
     {
         ekfom_data.valid = false;
-        ROS_WARN("No Effective Points! \n");
+        //ROS_WARN("No Effective Points! \n");
         return;
     }
 
@@ -617,6 +643,7 @@ int main(int argc, char** argv)
     nh.param<bool>("publish/scan_bodyframe_pub_en",scan_body_pub_en, true);
     nh.param<int>("max_iteration",NUM_MAX_ITERATIONS,4);
     nh.param<string>("map_file_path",map_file_path,"");
+    nh.param<bool>("enable_map_visualization", dense_pub_en, true);
     nh.param<string>("common/lid_topic",lid_topic,"/livox/lidar");
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
@@ -700,25 +727,56 @@ int main(int argc, char** argv)
     #if 1
         ros::Rate loop_rate(1000);
         bool status = ros::ok();
-        //INPUT YOUR PATH
-        std::string map_path = root_dir + "/PCD/scans.pcd";
+        
+        // 从参数读取地图路径，而不是硬编码
+        std::string map_path;
+        if (map_file_path.empty()) {
+            map_path = root_dir + "/PCD/scans.pcd";  // 默认路径
+            ROS_WARN("No map_file_path parameter set, using default: %s", map_path.c_str());
+        } else {
+            map_path = map_file_path;
+            ROS_INFO("Using map file: %s", map_path.c_str());
+        }
+        
+        // 检查文件是否存在
+        std::ifstream file_check(map_path.c_str());
+        if (!file_check.good()) {
+            ROS_ERROR("Map file does not exist: %s", map_path.c_str());
+            ROS_ERROR("Please check the map_file_path parameter in launch file");
+            return -1;
+        }
+        file_check.close();
+        
         std::unique_ptr<ReLocalization> pure_localization_;
         pure_localization_.reset(new ReLocalization(map_path));
         //! Define sensor data interface.
         ReLocalization& pure_localization = *pure_localization_;
         ros::Subscriber goal = nh.subscribe<geometry_msgs::PoseStamped>("/move_base_simple/goal", 5, 
                                                                         &ReLocalization::GetInitialPose, &pure_localization);
+        ros::Subscriber encoder = nh.subscribe<std_msgs::Int32>("/rotor_encoder", 5, 
+                                                                        &ReLocalization::EncoderCb, &pure_localization);
         //! 
         ros::Publisher pubGlobalLocalization= nh.advertise<nav_msgs::Odometry> ("/global_localization", 100000);
+        ros::Publisher pubBaseLocation = nh.advertise<nav_msgs::Odometry> ("/motor_base", 100000);
         ros::Publisher pub_map = nh.advertise<sensor_msgs::PointCloud2> ("/pcl_map", 1);
         ros::Publisher pub_local_map = nh.advertise<sensor_msgs::PointCloud2> ("/local_map", 1);
         pcl::PointCloud<pcl::PointXYZINormal> map_pt;
         sensor_msgs::PointCloud2 output;
         //be stuck here until loading map finished
         pure_localization_->GetMap(map_pt);
-        pcl::toROSMsg(map_pt, output);
+        
+        // 对地图点云进行下采样以减少内存占用
+        pcl::PointCloud<pcl::PointXYZINormal>::Ptr map_downsampled(new pcl::PointCloud<pcl::PointXYZINormal>);
+        pcl::VoxelGrid<pcl::PointXYZINormal> voxel_filter;
+        voxel_filter.setInputCloud(map_pt.makeShared());
+        voxel_filter.setLeafSize(0.05f, 0.05f, 0.05f); // 30cm体素大小，可根据需要调整
+        voxel_filter.filter(*map_downsampled);
+        
+        pcl::toROSMsg(*map_downsampled, output);
         output.header.frame_id = "map";
-        pub_map.publish(output);
+        output.header.stamp = ros::Time::now();
+        ROS_INFO("Publishing downsampled map: original %zu points -> %zu points", map_pt.points.size(), map_downsampled->points.size());
+        
         Eigen::Matrix4f estimation_pose = Eigen::Matrix4f::Identity();
 
         string pos_predict = root_dir + "/Log/predict.csv";
@@ -732,6 +790,16 @@ int main(int argc, char** argv)
         file_u << "x"<< ","<< "y"<< ","<< "z"<< ","<< "r"<< ","<< "p"<< ","<< "y"<< "\n";
         pcl::PointCloud<pcl::PointXYZINormal>::Ptr local_map_ptr;
         local_map_ptr.reset(new pcl::PointCloud<pcl::PointXYZINormal>);
+        
+        // 持续发布地图点云，即使没有初始位姿 - 降低发布频率以减少内存压力
+        ros::Timer map_timer;
+        if (dense_pub_en) {
+            map_timer = nh.createTimer(ros::Duration(5.0), [&](const ros::TimerEvent&) {
+                output.header.stamp = ros::Time::now();
+                pub_map.publish(output);
+            });
+        }
+        
         while (status) {
             if (flg_exit) {
                 pure_localization_->SetExit();
@@ -739,6 +807,13 @@ int main(int argc, char** argv)
             }
             ros::spinOnce();
             if (!pure_localization_->has_initial_pose_) {
+                // 即使没有初始位姿，也发布一次地图，但降低频率
+                static int map_pub_counter = 0;
+                if (++map_pub_counter % 10 == 0) {  // 每10次循环发布一次
+                    output.header.stamp = ros::Time::now();
+                    pub_map.publish(output);
+                    map_pub_counter = 0;
+                }
                 loop_rate.sleep();
                 continue;
             }
@@ -780,9 +855,11 @@ int main(int argc, char** argv)
                     Eigen::Matrix3d r;
                     r = estimation_pose.block<3,3>(0,0).cast<double>();
                     std::cout << "------>Initialization t = " << t.transpose() << std::endl;
+                    std::cout << "------>Initialization r = " << r << std::endl;
                     p_imu->Process(Measures, kf, feats_undistort, t, r);
                     pure_localization_->SetRelocalizationFlag();
                 } else {
+                    std::cout << "processing imu..." << std::endl;
                     p_imu->Process(Measures, kf, feats_undistort);
                 }
                 
@@ -890,7 +967,17 @@ int main(int argc, char** argv)
                 pub_local_map.publish(show);
 
                 /******* Publish odometry *******/
+                // 发布激光雷达坐标系下的位姿（T_map_lidar）
                 PublishLocalization(pubGlobalLocalization, estimation_pose);
+                
+                // 将激光雷达坐标系的位姿转换为基座坐标系的位姿
+                // T_map_base = T_map_lidar * T_lidar_base
+                
+                estimation_pose.block<3,3>(0,0) = estimation_pose.block<3,3>(0,0)*
+                (pure_localization_->GetTransform_L2B().block<3,3>(0,0));
+                
+                // 发布基座坐标系下的位姿（T_map_base）
+                PublishBaseLocalization(pubBaseLocation, estimation_pose);
 
                 
             } else {

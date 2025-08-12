@@ -1,4 +1,4 @@
-#ifndef COMMON_LIB_H
+ #ifndef COMMON_LIB_H
 #define COMMON_LIB_H
 
 #include <so3_math.h>
